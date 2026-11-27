@@ -519,6 +519,8 @@ class SapienMultiRobotWorld:
         arm_key: str,
         target_pos: Sequence[float],
         target_quat_wxyz: Sequence[float] = (0.0, 1.0, 0.0, 0.0),
+        *,
+        warm_start: bool = False,
     ) -> Tuple[Optional[np.ndarray], bool]:
         """Solve real `mplib` IK for `arm_key` at world pose `(target_pos, target_quat_wxyz)`."""
         import mplib
@@ -536,36 +538,41 @@ class SapienMultiRobotWorld:
 
         mask = np.ones(len(cur_full), dtype=bool)
         mask[h.arm_indices] = False
-        status, sols = h.planner.IK(goal, cur_full, mask=mask, n_init_qpos=30, return_closest=False)
-        if sols is None or len(sols) == 0:
-            h.last_ik_valid = False
-            return None, False
-        sols = np.asarray(sols, dtype=np.float64)
-        if sols.ndim == 1:
-            sols = sols[None, :]
         qlim = h.articulation.get_qlimits()[h.arm_indices]
         cur_arm = cur_full[h.arm_indices]
         revolute = np.array([h.planner.joint_types[i].startswith("JointModelR") for i in h.arm_indices], dtype=bool)
         best_q = None
         best_dist = float("inf")
-        for full_cand in sols:
-            q = full_cand[h.arm_indices].copy()
-            if not np.isfinite(q).all():
+        # Adjacent policy commands normally converge from the previous joint target.
+        # Keep the full collision-checked search for distant or failed targets.
+        for starts in ((1, 30) if warm_start else (30,)):
+            start = cur_full
+            if starts == 1:
+                start = cur_full.copy()
+                start[h.arm_indices] = h.target_q
+            _, sols = h.planner.IK(goal, start, mask=mask, n_init_qpos=starts, return_closest=False)
+            if sols is None:
                 continue
-            # mplib puts revolute solutions near the lower limit. Choose the
-            # equivalent angle nearest to the actual state before interpolating.
-            angle = q[revolute]
-            turn = 2.0 * np.pi
-            limits = qlim[revolute]
-            low = np.ceil((limits[:, 0] - angle - 1e-4) / turn)
-            high = np.floor((limits[:, 1] - angle + 1e-4) / turn)
-            q[revolute] += turn * np.clip(np.rint((cur_arm[revolute] - angle) / turn), low, high)
-            if np.any(q < qlim[:, 0] - 1e-4) or np.any(q > qlim[:, 1] + 1e-4):
-                continue
-            d = float(np.linalg.norm(q - cur_arm))
-            if d < best_dist:
-                best_dist = d
-                best_q = q.copy()
+            for full_cand in np.atleast_2d(np.asarray(sols, dtype=np.float64)):
+                q = full_cand[h.arm_indices].copy()
+                if not np.isfinite(q).all():
+                    continue
+                # mplib puts revolute solutions near the lower limit. Choose the
+                # equivalent angle nearest to the actual state before interpolating.
+                angle = q[revolute]
+                turn = 2.0 * np.pi
+                limits = qlim[revolute]
+                low = np.ceil((limits[:, 0] - angle - 1e-4) / turn)
+                high = np.floor((limits[:, 1] - angle + 1e-4) / turn)
+                q[revolute] += turn * np.clip(np.rint((cur_arm[revolute] - angle) / turn), low, high)
+                if np.any(q < qlim[:, 0] - 1e-4) or np.any(q > qlim[:, 1] + 1e-4):
+                    continue
+                d = float(np.linalg.norm(q - cur_arm))
+                if d < best_dist:
+                    best_dist = d
+                    best_q = q.copy()
+            if best_q is not None and (starts == 30 or best_dist < .25):
+                break
         if best_q is None:
             h.last_ik_valid = False
             return None, False
@@ -619,6 +626,8 @@ class SapienMultiRobotWorld:
         targets: Dict[str, Tuple[Sequence[float], Optional[Sequence[float]]]],
         steps: int = 25,
         grippers: Optional[Dict[str, float]] = None,
+        *,
+        warm_start_ik: bool = False,
     ) -> bool:
         """Solve IK for all requested arms and smoothly execute via real 250 Hz PhysX steps.
 
@@ -630,7 +639,7 @@ class SapienMultiRobotWorld:
             h = self.arms[arm_key]
             if quat is None:
                 _, quat = self.get_arm_pose(arm_key)
-            q_sol, ok = self.solve_ik(arm_key, pos, quat)
+            q_sol, ok = self.solve_ik(arm_key, pos, quat, warm_start=warm_start_ik)
             if not ok or q_sol is None:
                 return False
             q_starts[arm_key] = h.articulation.get_qpos()[h.arm_indices].copy()

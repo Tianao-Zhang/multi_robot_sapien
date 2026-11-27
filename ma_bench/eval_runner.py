@@ -172,6 +172,9 @@ def run_single_trial(
         })
         if info.slug == "joint_bowl_placing" and hasattr(env, "world"):
             metrics.details["bowl_layout"] = env.world.bodies["bowl"]["attributes"]
+            bowl = env.world.frames[-1].bodies["bowl"] if env.world.frames else env.world.initial_bodies["bowl"]
+            metrics.details["bowl_final_position"] = bowl.pos
+            metrics.details["bowl_final_regions"] = bowl.in_regions
         return metrics
     finally:
         try:

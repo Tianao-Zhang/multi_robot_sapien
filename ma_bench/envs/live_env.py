@@ -61,6 +61,7 @@ class LiveSceneEnv(MultiRobotEnv):
         self.on_control = None
         self.camera_mounts = {}
         self.motion = None
+        self._last_bowl_command = None
 
     def initialize(self, seed: int) -> None:
         import mplib
@@ -74,6 +75,9 @@ class LiveSceneEnv(MultiRobotEnv):
         self.world = _ScoredWorld(self.spec, ExecutionMode(mode="team", seed=seed), robotwin_root=self.robotwin_root,
                                   render_width=width, render_height=height, enable_render=False)
         self.layout = build_layout(self.world, self.task_info.slug)
+        if self.task_info.slug == "joint_bowl_placing":
+            low, high = self.world.regions["goal_zone"]
+            self.evaluator = make_evaluator(self.task_info.slug, seed=seed, goal_bounds_xy=(low[:2], high[:2]))
         self._add_cameras()
         self.world.settle()
         self.world.on_control = self._score
@@ -203,6 +207,7 @@ class LiveSceneEnv(MultiRobotEnv):
         actions = np.asarray(absolute_ee_targets_wxyz, dtype=np.float64)
         if actions.shape != (self.num_agents, 16) or not np.isfinite(actions).all():
             raise ValueError(f"Expected finite [{self.num_agents}, 16] end-effector targets")
+        bowl = self.task_info.slug == "joint_bowl_placing"
         targets, grippers = {}, {}
         for i, robot in enumerate(self.task_info.robots):
             transform = self.agent_to_world(robot.role_key)
@@ -212,10 +217,19 @@ class LiveSceneEnv(MultiRobotEnv):
                 norm = np.linalg.norm(quat)
                 if norm < 1e-8:
                     raise ValueError(f"Invalid zero quaternion for {key}")
-                targets[key] = (rotation.apply(xyz) + transform[:3, 3], wxyz(rotation * as_rotation(quat / norm)))
-                grippers[key] = opening
-        if not self.world.move_arms_to(targets, steps=1, grippers=grippers):
+                pose = slice(8*j, 8*j+7)
+                same_pose = (
+                    bowl and self._last_bowl_command is not None
+                    and np.array_equal(actions[i, pose], self._last_bowl_command[i, pose])
+                )
+                if not same_pose:
+                    targets[key] = (rotation.apply(xyz) + transform[:3, 3], wxyz(rotation * as_rotation(quat / norm)))
+                if not bowl or np.clip(opening, 0., 1.) != self.world.arms[key].gripper_open:
+                    grippers[key] = opening
+        if not self.world.move_arms_to(targets, steps=1, grippers=grippers, warm_start_ik=bowl):
             raise RuntimeError("SAPIEN/mplib could not solve the requested control step")
+        if bowl:
+            self._last_bowl_command = actions.copy()
         return self.step_count >= self.max_steps
 
     def step_control(self, absolute_ee_targets_wxyz):
@@ -292,3 +306,4 @@ class LiveSceneEnv(MultiRobotEnv):
         self.world = self.layout = self.motion = None
         self.camera_mounts.clear()
         self._reference_pose_wxyz = None
+        self._last_bowl_command = None

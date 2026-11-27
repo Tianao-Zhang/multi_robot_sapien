@@ -52,6 +52,7 @@ def audit_episode(root: Path, entry: dict) -> dict:
     require(info["seed"] == seed and info["native_exit_code"] == 0 and not info["errors"], f"Native run failed for seed {seed}")
     require(info["accepted"] and all(info["metrics"]["milestones"].values()) and len(info["metrics"]["milestones"]) == 6,
             f"Missing milestones for seed {seed}")
+    require("goal_zone" in info["object_motion"]["bowl"]["final_regions"], f"Bowl finished outside the goal pad for seed {seed}")
     lifts = [info["four_arm_lift_ticks"][arm] for arm in ARMS]
     require(info["four_arm_relay"] and lifts == sorted(set(lifts)), f"Unverified grasp order for seed {seed}")
     ticks = np.arange(info["recorded_ticks"])
