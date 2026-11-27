@@ -50,6 +50,8 @@ env -u PYTHONPATH .venv-train/bin/python -m mawam.data.prepare_collected \
 
 在同一个终端中使用上一步的 `prepared` 和 `run_id`。根据本次分配的显卡设置 `CUDA_VISIBLE_DEVICES` 和 `NPROC`。启动器使用单机独立端口，默认八张卡，每阶段默认 3,000 次更新。Stage 2 从此次 Stage 1 的训练权重初始化。
 
+9003 的双卡训练验证使用 NCCL 本机共享内存通信。启动训练前执行 `export NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1`。
+
 ```bash
 source .venv-train/bin/activate
 stage1_run="runs/color_${run_id}_stage1"
