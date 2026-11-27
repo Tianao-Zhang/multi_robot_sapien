@@ -127,8 +127,7 @@ def main() -> int:
             for i in range(max_len):
                 for k in agent_keys:
                     interleaved.append(pools[k][i % len(pools[k])])
-            while len(interleaved) < epoch_steps * world:
-                interleaved.append(interleaved[len(interleaved) % len(interleaved)])
+            interleaved += [interleaved[i % epoch_size] for i in range(epoch_steps * world - epoch_size)]
             return interleaved[offset * world + rank], epoch
 
         model = WanTransformer3DModel.from_pretrained(

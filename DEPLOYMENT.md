@@ -2,6 +2,12 @@
 
 首次在服务器的项目父目录执行 `git clone https://github.com/Tianao-Zhang/multi_robot_sapien.git`。后续本地在 `main` 提交、执行 `git push`，服务器在 `multi_robot_sapien` 目录执行 `git pull --ff-only`。代码、配置和脚本随 Git 同步。两套 Python 环境、机器人资产、数据、录像、日志和模型权重保存在各自机器的项目目录。
 
+服务器到 GitHub 的连接不稳定时，可以从本地经 SSH 同步。首次在服务器仓库运行 `git config --local receive.denyCurrentBranch updateInstead`，在本地添加 `git remote add server9003 ssh://SERVER/ABSOLUTE/PATH/TO/multi_robot_sapien`。之后在本地执行下面两条命令，第二条推送会在服务器工作区干净时同步检出的代码。
+
+```bash
+git push origin main && git push server9003 main
+```
+
 ## 环境
 
 安装 `uv`、Python 3.10、`unzip` 和支持 Vulkan/CUDA 的 NVIDIA 驱动。仿真环境和模型环境分别使用 `.venv` 和 `.venv-train`。可用 `UV_BIN` 指定项目目录里的 `uv`，例如 `export UV_BIN="$PWD/.tools/bin/uv"`。

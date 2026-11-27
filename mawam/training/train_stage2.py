@@ -125,7 +125,7 @@ def main() -> int:
                 ids = torch.randperm(
                     count, generator=torch.Generator().manual_seed(train_cfg.seed + epoch)
                 ).tolist()
-                ids += ids[: epoch_steps * world - len(ids)]
+                ids += [ids[i % count] for i in range(epoch_steps * world - count)]
                 schedule_cache[epoch] = ids
             return schedule_cache[epoch][offset * world + rank], epoch
 

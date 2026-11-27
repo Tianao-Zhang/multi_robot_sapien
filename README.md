@@ -66,6 +66,8 @@ MAWAM/
 
 ## Installation
 
+For the local SAPIEN scenes and the Git-based server workflow, see [deployment and training](DEPLOYMENT.md) and [simulation and recording](LOCAL_SETUP.md).
+
 ### 1. Core Package & Offline Verification (CPU-only, no GPU or API key required)
 
 ```bash
