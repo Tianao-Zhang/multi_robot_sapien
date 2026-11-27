@@ -22,11 +22,11 @@ import json
 import os
 from pathlib import Path
 import random
-import sys
 import time
 
 from ma_bench.action_codec import ActionCodec
 from mawam.config import Stage1Config, load_training_config
+from mawam.upstream import add_lingbot_source
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,7 +52,7 @@ def main() -> int:
     if args.save_interval is not None:
         train_cfg.save_interval = int(args.save_interval)
 
-    sys.path.insert(0, str(args.upstream_root.resolve()))
+    add_lingbot_source(args.upstream_root)
     import numpy as np
     import torch
     import torch.distributed as dist
@@ -132,7 +132,7 @@ def main() -> int:
             return interleaved[offset * world + rank], epoch
 
         model = WanTransformer3DModel.from_pretrained(
-            str(args.initial_checkpoint / "transformer"), torch_dtype=torch.float32
+            str(args.initial_checkpoint / "transformer"), torch_dtype=torch.float32, attn_mode="flex"
         )
         model.train().requires_grad_(True)
         for i, block in enumerate(model.blocks):

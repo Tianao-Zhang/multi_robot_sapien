@@ -1,0 +1,13 @@
+diff --git a/wan_va/train.py b/wan_va/train.py
+--- a/wan_va/train.py
++++ b/wan_va/train.py
+@@ -46,2 +46,1 @@ from utils import (
+-from dataset import MultiLatentLeRobotDataset
+ import gc
+@@ -120,4 +119,6 @@ class Trainer:
+         # Setup dataloaders
++        from dataset import MultiLatentLeRobotDataset
++
+         logger.info("Setting up datasets...")
+         train_dataset = MultiLatentLeRobotDataset(config=config)
+         train_sampler = DistributedSampler(

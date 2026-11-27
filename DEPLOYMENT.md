@@ -1,0 +1,55 @@
+# 本地开发与服务器运行
+
+首次在服务器的项目父目录执行 `git clone https://github.com/Tianao-Zhang/multi_robot_sapien.git`。后续本地在 `main` 提交、执行 `git push`，服务器在 `multi_robot_sapien` 目录执行 `git pull --ff-only`。代码、配置和脚本随 Git 同步。两套 Python 环境、机器人资产、数据、录像、日志和模型权重保存在各自机器的项目目录。
+
+## 环境
+
+安装 `uv`、Python 3.10、`unzip` 和支持 Vulkan/CUDA 的 NVIDIA 驱动。仿真环境和模型环境分别使用 `.venv` 和 `.venv-train`。可用 `UV_BIN` 指定项目目录里的 `uv`，例如 `export UV_BIN="$PWD/.tools/bin/uv"`。
+
+```bash
+# 准备好 third_party/downloads/embodiments.zip 后执行
+bash scripts/setup_sim.sh
+
+# Linux x86-64 和 CUDA 12.8
+bash scripts/setup_train.sh
+source .venv-train/bin/activate
+HF_HOME="$PWD/.tools/hf" hf download robbyant/lingbot-va-base \
+  --revision 68b7bc1b35da6ddc67ea94c4ceb58d768fbb3f9c \
+  --include 'tokenizer/*' 'text_encoder/*' 'vae/*' 'transformer/*' \
+  --local-dir checkpoints/lingbot-va-base
+```
+
+仿真资产来源和输出格式见 [本地仿真说明](LOCAL_SETUP.md)。训练脚本安装 Python 3.12、PyTorch 2.9.0 CUDA 12.8、FlashAttention 和指定版本的 LingBot-VA 源码。LingBot-VA 的 LeRobot 数据加载只在调用其原版训练器时导入，MAWAM 使用自己的数据集。 [LingBot-VA 基础权重](https://huggingface.co/robbyant/lingbot-va-base/tree/68b7bc1b35da6ddc67ea94c4ceb58d768fbb3f9c)
+
+## 场景、采集与数据准备
+
+从仓库根目录执行。用新的 `run_id` 为每批结果保留独立目录。
+
+```bash
+run_id="$(date -u +%Y%m%dT%H%M%SZ)"
+raw="datasets/color_${run_id}"
+prepared="datasets/color_${run_id}_training"
+
+env -u PYTHONPATH .venv/bin/python -m ma_bench.run_scenes \
+  --seed 0 --output "runs/scenes_${run_id}"
+env -u PYTHONPATH .venv/bin/python -m ma_bench.collect_demos \
+  --task find_common_color --seed-start 0 --num-episodes 3 --output "$raw"
+env -u PYTHONPATH .venv-train/bin/python -m mawam.data.prepare_collected \
+  --input-root "$raw" --output "$prepared"
+```
+
+七个场景可分别运行和录像。同步数据采集与上述转换入口支持 `find_common_color`。转换只读取已验收的示范，按控制 tick 检查双机器人和三路镜头的同步。动作标签取实际执行后的双臂末端位姿和夹爪开度，RGB 由 25 Hz 下采样到 6.25 Hz 后用 Wan VAE 编码。输出包含 Stage 1 逐机器人清单、Stage 2 同步配对清单及冻结的 T5 文本缓存。
+
+## 训练
+
+在同一个终端中使用上一步的 `prepared` 和 `run_id`。根据本次分配的显卡设置 `CUDA_VISIBLE_DEVICES` 和 `NPROC`。启动器使用单机独立端口，默认八张卡，每阶段默认 3,000 次更新。Stage 2 从此次 Stage 1 的训练权重初始化。
+
+```bash
+source .venv-train/bin/activate
+stage1_run="runs/color_${run_id}_stage1"
+DATASET_ROOT="$prepared/stage1" RUN_ROOT="$stage1_run" \
+  bash scripts/train_stage1.sh
+DATASET_ROOT="$prepared/stage2" RUN_ROOT="runs/color_${run_id}_stage2" \
+  STAGE1_CKPT="$stage1_run/checkpoints/checkpoint_step_3000" \
+  bash scripts/train_stage2.sh
+```

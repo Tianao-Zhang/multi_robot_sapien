@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
+from os.path import relpath
 from pathlib import Path
 from typing import Any, Dict, List
 
 
 def build_stage2_manifest(stage1_root: Path, output_root: Path, task: str) -> Dict[str, Any]:
+    def stage2_path(value: str) -> str:
+        path = Path(value)
+        return str(path) if path.is_absolute() else relpath(stage1_root / path, output_root)
+
     s1 = json.loads((stage1_root / "manifest.json").read_text(encoding="utf-8"))
     by_joint: Dict[str, List[Dict[str, Any]]] = {}
     for ep in s1["episodes"]:
@@ -31,7 +36,14 @@ def build_stage2_manifest(stage1_root: Path, output_root: Path, task: str) -> Di
                 "frames": frames,
                 "latent_frames": latents,
                 "split": "train",
-                "agents": agents,
+                "agents": [
+                    {
+                        **agent,
+                        "actions_path": stage2_path(agent["actions_path"]),
+                        "latent_paths": {key: stage2_path(value) for key, value in agent["latent_paths"].items()},
+                    }
+                    for agent in agents
+                ],
             }
         )
 

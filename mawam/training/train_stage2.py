@@ -24,11 +24,11 @@ import json
 import os
 from pathlib import Path
 import random
-import sys
 import time
 
 from ma_bench.action_codec import ActionCodec
 from mawam.config import Stage2Config, load_training_config
+from mawam.upstream import add_lingbot_source
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,7 +57,7 @@ def main() -> int:
     if args.window_frames is not None:
         train_cfg.window_frames = int(args.window_frames)
 
-    sys.path.insert(0, str(args.upstream_root.resolve()))
+    add_lingbot_source(args.upstream_root)
     import numpy as np
     import torch
     import torch.distributed as dist

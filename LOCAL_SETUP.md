@@ -24,3 +24,5 @@ env -u PYTHONPATH .venv/bin/python -m ma_bench.collect_demos \
 安装 Python 3.10 和 `uv`。将 RoboTwin 2.0 发布的 `embodiments.zip` 保存到 `third_party/downloads/embodiments.zip`，再运行 `bash scripts/setup_sim.sh`。脚本校验归档、解压机器人资产并安装仿真依赖。`ROBOTWIN_ASSET_ARCHIVE` 可指定归档路径，`ROBOTWIN_ROOT` 可指定已有的资产 checkout。 [RoboTwin 资产发布](https://huggingface.co/datasets/TianxingChen/RoboTwin2.0/blob/main/embodiments.zip)
 
 专家运行使用仿真状态和本地运动控制，场景验证和采集可以离线执行。
+
+Git 同步、服务器环境、录制数据转换与训练命令见 [部署说明](DEPLOYMENT.md)。

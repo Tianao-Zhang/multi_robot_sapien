@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 
 from ma_bench.registry import get_task_info
+from mawam.upstream import add_lingbot_source
 
 
 def encode_prompts(
@@ -92,8 +93,10 @@ def main() -> int:
     p.add_argument("--base-model", type=Path, required=True, help="Path to LingBot-VA base model (contains tokenizer/ & text_encoder/)")
     p.add_argument("--output", type=Path, required=True, help="Dataset root where text/text_cache.pt will be saved")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--upstream-root", type=Path, default=Path("third_party/LingBot-VA"))
     args = p.parse_args()
 
+    add_lingbot_source(args.upstream_root)
     info = get_task_info(args.task)
     out = encode_prompts(
         model_dir=args.base_model.resolve(),
