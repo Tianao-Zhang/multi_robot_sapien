@@ -1,4 +1,5 @@
 # MA-Bench simulation environment (RoboTwin 2.0 + SAPIEN)
+setuptools==80.9.0  # SAPIEN 3.0.0b1 imports pkg_resources
 numpy==1.26.4
 sapien==3.0.0b1
 mplib==0.2.1

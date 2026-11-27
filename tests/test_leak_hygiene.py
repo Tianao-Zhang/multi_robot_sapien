@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import subprocess
 from typing import List, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -30,7 +31,15 @@ FORBIDDEN_PATTERNS: List[Tuple[str, re.Pattern[str]]] = [
 def scan_repo(root: Path = REPO_ROOT) -> List[Tuple[Path, int, str, str]]:
     hits: List[Tuple[Path, int, str, str]] = []
     this_file = Path(__file__).resolve()
-    for path in sorted(root.rglob("*")):
+    if (root / ".git").exists():
+        paths = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            cwd=root, capture_output=True, text=True, check=True,
+        ).stdout.split("\0")
+        candidates = (root / path for path in paths if path)
+    else:
+        candidates = root.rglob("*")
+    for path in sorted(candidates):
         if not path.is_file():
             continue
         if ".git" in path.parts or "__pycache__" in path.parts:

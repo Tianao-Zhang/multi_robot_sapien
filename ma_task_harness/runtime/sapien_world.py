@@ -21,7 +21,7 @@ import io
 import math
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -75,7 +75,7 @@ EMBODIMENT_ASSET_SPECS: Dict[str, Dict[str, Any]] = {
                 "finger_joints": ["base_joint_gripper_left", "base_joint_gripper_right"],
                 "finger_links": ("finger_left", "finger_right", "gripper_left", "gripper_right"),
                 "gripper_open_q": [-0.055, 0.055],
-                "gripper_closed_q": [0.0, 0.0],
+                "gripper_closed_q": [-0.0027, 0.0027],
                 "home_q": [0.0, -1.35, 1.55, -1.75, -1.57, 0.0],
                 "topdown_quat": [0.7071, 0.0, 0.7071, 0.0],
                 "tcp_z_offset": 0.135,
@@ -442,6 +442,7 @@ class SapienMultiRobotWorld:
                 lk = art.find_link_by_name(fl_name)
                 if lk is not None:
                     self._finger_tags[lk.entity.per_scene_id] = (arm_key, fl_name)
+                    self._entity_tags[lk.entity.per_scene_id] = f"{arm_key}.{fl_name}"
 
             # Initialize real mplib planner in robot-local frame (solve_ik maps world -> local once)
             planner = mplib.Planner(
@@ -541,12 +542,21 @@ class SapienMultiRobotWorld:
             sols = sols[None, :]
         qlim = h.articulation.get_qlimits()[h.arm_indices]
         cur_arm = cur_full[h.arm_indices]
+        revolute = np.array([h.planner.joint_types[i].startswith("JointModelR") for i in h.arm_indices], dtype=bool)
         best_q = None
         best_dist = float("inf")
         for full_cand in sols:
-            q = full_cand[h.arm_indices]
+            q = full_cand[h.arm_indices].copy()
             if not np.isfinite(q).all():
                 continue
+            # mplib puts revolute solutions near the lower limit. Choose the
+            # equivalent angle nearest to the actual state before interpolating.
+            angle = q[revolute]
+            turn = 2.0 * np.pi
+            limits = qlim[revolute]
+            low = np.ceil((limits[:, 0] - angle - 1e-4) / turn)
+            high = np.floor((limits[:, 1] - angle + 1e-4) / turn)
+            q[revolute] += turn * np.clip(np.rint((cur_arm[revolute] - angle) / turn), low, high)
             if np.any(q < qlim[:, 0] - 1e-4) or np.any(q > qlim[:, 1] + 1e-4):
                 continue
             d = float(np.linalg.norm(q - cur_arm))
@@ -686,12 +696,12 @@ class SapienMultiRobotWorld:
             seen_pairs[key] = max(seen_pairs.get(key, 0.0), force_n)
 
         for (e0, e1), force_n in seen_pairs.items():
-            # Check if this contact belongs to a whitelisted arm-body grasp
+            # Classify contacts by the contacting arm, including two arms of
+            # the same articulation holding one object simultaneously.
             wl = False
             opposed = False
             for ak, bn in self._whitelisted_grasps:
-                ag = ak.split(".")[0]
-                if (e0 == bn and e1.startswith(f"{ag}.")) or (e1 == bn and e0.startswith(f"{ag}.")):
+                if (e0 == bn and e1.startswith(f"{ak}.")) or (e1 == bn and e0.startswith(f"{ak}.")):
                     wl = True
                     opposed = len(finger_hits.get((ak, bn), set())) >= 2
                     break
@@ -715,7 +725,7 @@ class SapienMultiRobotWorld:
             if rec["kind"] == "hinge":
                 art = rec["articulation"]
                 lk = rec["link"]
-                pose = lk.get_pose()
+                pose = lk.get_entity_pose()
                 deg = math.degrees(float(art.get_qpos()[0]))
                 out[name] = BodyState(
                     name=name,
@@ -781,12 +791,19 @@ class SapienMultiRobotWorld:
         if views:
             self.rendered_frames.append({"step": self.step_count, "t": round(t_s, 3), "views": views})
 
-    def step_control(self, metadata: Optional[Dict[str, Any]] = None) -> ControlFrame:
+    def step_control(
+        self,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        physics_observer: Optional[Callable[[List[ContactEvent]], None]] = None,
+    ) -> ControlFrame:
         """Advance 1 control step (10 PhysX substeps @ 250 Hz), record real contacts & optional RGB."""
         all_contacts: List[ContactEvent] = []
         for _ in range(self.substeps):
             self.scene.step()
             all_contacts = self._read_contacts()
+            if physics_observer is not None:
+                physics_observer(all_contacts)
 
         t_s = self.step_count * self.control_dt
         arm_states: Dict[str, ArmState] = {}

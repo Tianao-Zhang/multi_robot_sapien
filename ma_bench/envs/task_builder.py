@@ -53,8 +53,11 @@ def build_task_env(
             "Install `requirements-sim.txt` or pass `--backend dry_run` for offline verification."
         ) from exc
 
-    raise NotImplementedError(
-        f"SAPIEN scene plugin for {info.slug!r} expects RoboTwin 2.0 assets from "
-        "`https://huggingface.co/datasets/EmbodiedCity/MA-Bench` mounted under `MA_BENCH_ASSETS`. "
-        "See README.md for environment setup."
-    )
+    if info.slug == "find_common_color":
+        from ma_bench.envs.color_env import FindCommonColorEnv
+
+        return FindCommonColorEnv(info, evaluator, robotwin_root=rt_root, assets_root=assets_root)
+
+    from ma_bench.envs.live_env import LiveSceneEnv
+
+    return LiveSceneEnv(info, evaluator, robotwin_root=rt_root, assets_root=assets_root)

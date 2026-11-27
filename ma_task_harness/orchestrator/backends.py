@@ -55,7 +55,7 @@ def apply_file_blocks(text: str, workspace: Path) -> List[str]:
         rel = match.group(1).strip().lstrip("/")
         content = match.group(2)
         target = (ws_root / rel).resolve()
-        if not str(target).startswith(str(ws_root)):
+        if not target.is_relative_to(ws_root) or target == ws_root:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content + ("\n" if not content.endswith("\n") else ""), encoding="utf-8")
@@ -220,7 +220,7 @@ class CodexBackend:
 
 
 class OpenAICompatBackend:
-    """OpenAI-compatible Chat Completions API backend (OpenAI / DeepSeek / LiteLLM).
+    """Chat Completions or opt-in OpenAI Responses backend.
 
     Instructs the model to return updated files as `### FILE: relative/path` fenced
     blocks and applies them safely inside `workspace`.
@@ -237,6 +237,9 @@ class OpenAICompatBackend:
         self.model = model
         self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
         self.api_key = api_key or os.environ.get("MAWAM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        self.api = os.environ.get("MAWAM_OPENAI_API", "chat/completions")
+        if self.api not in ("chat/completions", "responses"):
+            raise ValueError("MAWAM_OPENAI_API must be 'chat/completions' or 'responses'")
 
     def run(
         self,
@@ -271,12 +274,21 @@ class OpenAICompatBackend:
             ],
             "temperature": 0.2,
         }
+        if self.api == "responses":
+            payload = {
+                "model": self.model,
+                "instructions": system_prompt,
+                "input": full_user,
+                "reasoning": {"effort": "medium"},
+                "max_output_tokens": 16000,
+                "store": False,
+            }
         t0 = time.perf_counter()
         try:
             import urllib.request
 
             req = urllib.request.Request(
-                f"{self.base_url}/chat/completions",
+                f"{self.base_url}/{self.api}",
                 data=json.dumps(payload).encode("utf-8"),
                 headers={
                     "Content-Type": "application/json",
@@ -286,14 +298,24 @@ class OpenAICompatBackend:
             )
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            text = data["choices"][0]["message"]["content"]
+            if self.api == "responses":
+                if data.get("status") != "completed":
+                    raise RuntimeError(f"OpenAI response status: {data.get('status')}")
+                text = "\n".join(
+                    content["text"] for item in data["output"] if item.get("type") == "message"
+                    for content in item["content"] if content.get("type") == "output_text"
+                )
+                if not text.strip():
+                    raise RuntimeError("OpenAI response contained no text")
+            else:
+                text = data["choices"][0]["message"]["content"]
             written = apply_file_blocks(text, workspace)
             return AgentResult(
                 ok=True,
                 backend=self.name,
                 stdout=text,
                 elapsed_s=round(time.perf_counter() - t0, 3),
-                artifacts={"written_files": written},
+                artifacts={"written_files": written, "model": data.get("model"), "usage": data.get("usage")},
             )
         except Exception as exc:  # noqa: BLE001
             return AgentResult(
