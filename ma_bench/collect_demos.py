@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import fcntl
 import json
 from multiprocessing import get_context
 import os
@@ -249,28 +250,50 @@ def finalize_episode(root: Path, staging: Path, seed: int, task: str, exit_code:
     return report
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task", default="find_common_color")
-    parser.add_argument("--output", type=Path, required=True, help="New dataset directory")
-    parser.add_argument("--num-episodes", type=int, default=3)
-    parser.add_argument("--seed-start", type=int, default=0)
-    parser.add_argument("--max-attempts", type=int, help="Attempt cap, including rejected episodes (default: --num-episodes)")
-    parser.add_argument("--workers", type=int, default=1)
-    parser.add_argument("--episode-timeout", type=float, default=300, help="Wall-clock seconds per isolated run")
-    parser.add_argument("--video-stride", type=int, choices=(1, 4), default=1, help="Sample RGB at 25 Hz or 6.25 Hz")
-    parser.add_argument("--render-device", action="append", default=[], help="SAPIEN device, e.g. cuda:3; may be repeated")
-    args = parser.parse_args()
-    task = get_task_info(args.task).slug
-    if task not in COLLECTION_TASKS:
-        parser.error(f"The local expert collector supports {', '.join(COLLECTION_TASKS)}")
-    max_attempts = args.num_episodes if args.max_attempts is None else args.max_attempts
-    if args.num_episodes < 1 or args.seed_start < 0 or max_attempts < args.num_episodes or args.workers < 1 or args.episode_timeout <= 0:
-        parser.error("Provide positive episode, worker and timeout counts, a nonnegative seed and enough attempts")
+def append_episode(batch: dict, result: dict, manifest: Path) -> None:
+    batch["episodes"].append({key: result[key] for key in ("seed", "accepted", "directory", "errors", "native_exit_code")})
+    batch["accepted"] += int(result["accepted"])
+    write_json(manifest, batch)
+    status = "accepted" if result["accepted"] else "rejected"
+    print(f"seed={result['seed']} {status} ticks={result.get('recorded_ticks', 0)} {result['directory']}", flush=True)
 
-    args.output.mkdir(parents=True, exist_ok=False)
-    batch = {"task": task, "requested": args.num_episodes, "accepted": 0, "video_stride": args.video_stride, "episodes": []}
-    write_json(args.output / "collection_report.json", batch)
+
+def load_collection(args, task: str, max_attempts: int) -> dict:
+    manifest = args.output / "collection_report.json"
+    if not args.resume:
+        batch = {"task": task, "requested": args.num_episodes, "accepted": 0, "video_stride": args.video_stride, "episodes": []}
+        write_json(manifest, batch)
+        return batch
+
+    batch = json.loads(manifest.read_text())
+    settings = batch["task"], batch["requested"], batch["video_stride"]
+    if settings != (task, args.num_episodes, args.video_stride):
+        raise ValueError("Resume requires the original task, episode count and video stride")
+    if any(row["seed"] != args.seed_start + i for i, row in enumerate(batch["episodes"])):
+        raise ValueError("Resume requires the original starting seed")
+    done = len(batch["episodes"])
+    folders = [args.output / group / task for group in ("tasks", "rejected")] + [args.output / "in_progress"]
+    indexes = [int(path.name.removeprefix("episode")) for folder in folders for path in folder.glob("episode[0-9]*")]
+    end = max(indexes, default=-1) + 1
+    if end > max_attempts or done > max_attempts:
+        raise ValueError("The attempt cap is smaller than the existing collection")
+    for index in range(done, end):
+        name = f"episode{index}"
+        seed = args.seed_start + index
+        final = next((folder / name / "episode_report.json" for folder in folders[:2] if (folder / name).is_dir()), None)
+        if final is not None:
+            result = json.loads(final.read_text())
+            if result["seed"] != seed:
+                raise ValueError(f"Seed mismatch for {final}")
+        else:
+            result = finalize_episode(args.output, folders[2] / name, seed, task, -2, False)
+        append_episode(batch, result, manifest)
+    return batch
+
+
+def run_collection(args, task: str, max_attempts: int) -> int:
+    batch = load_collection(args, task, max_attempts)
+    manifest = args.output / "collection_report.json"
     context = get_context("spawn")
     devices = args.render_device or [None]
     while (attempted := len(batch["episodes"])) < max_attempts and batch["accepted"] < args.num_episodes:
@@ -290,18 +313,46 @@ def main() -> int:
                     job.kill()
                     job.join()
                 result = finalize_episode(args.output, staging, seed, task, job.exitcode, timed_out)
-                batch["episodes"].append({key: result[key] for key in ("seed", "accepted", "directory", "errors", "native_exit_code")})
-                batch["accepted"] += int(result["accepted"])
-                write_json(args.output / "collection_report.json", batch)
-                status = "accepted" if result["accepted"] else "rejected"
-                print(f"seed={seed} {status} ticks={result.get('recorded_ticks', 0)} {result['directory']}", flush=True)
+                append_episode(batch, result, manifest)
         finally:
             for job, *_ in jobs:
                 if job.is_alive():
                     job.terminate()
                     job.join()
-    (args.output / "in_progress").rmdir()
+    staging = args.output / "in_progress"
+    if staging.is_dir():
+        staging.rmdir()
     return int(batch["accepted"] != args.num_episodes)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task", default="find_common_color")
+    parser.add_argument("--output", type=Path, required=True, help="New dataset directory")
+    parser.add_argument("--num-episodes", type=int, default=3)
+    parser.add_argument("--seed-start", type=int, default=0)
+    parser.add_argument("--max-attempts", type=int, help="Attempt cap, including rejected episodes (default: --num-episodes)")
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--episode-timeout", type=float, default=300, help="Wall-clock seconds per isolated run")
+    parser.add_argument("--video-stride", type=int, choices=(1, 4), default=1, help="Sample RGB at 25 Hz or 6.25 Hz")
+    parser.add_argument("--render-device", action="append", default=[], help="SAPIEN device, e.g. cuda:3; may be repeated")
+    parser.add_argument("--resume", action="store_true", help="Continue a stopped collection, retaining partial attempts")
+    args = parser.parse_args()
+    task = get_task_info(args.task).slug
+    if task not in COLLECTION_TASKS:
+        parser.error(f"The local expert collector supports {', '.join(COLLECTION_TASKS)}")
+    max_attempts = args.num_episodes if args.max_attempts is None else args.max_attempts
+    if args.num_episodes < 1 or args.seed_start < 0 or max_attempts < args.num_episodes or args.workers < 1 or args.episode_timeout <= 0:
+        parser.error("Provide positive episode, worker and timeout counts, a nonnegative seed and enough attempts")
+
+    if args.resume:
+        if not (args.output / "collection_report.json").is_file():
+            parser.error("The collection to resume must already have a manifest")
+    else:
+        args.output.mkdir(parents=True, exist_ok=False)
+    with (args.output / "collection.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return run_collection(args, task, max_attempts)
 
 
 if __name__ == "__main__":

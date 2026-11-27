@@ -804,9 +804,11 @@ class SapienMultiRobotWorld:
         all_contacts: List[ContactEvent] = []
         for _ in range(self.substeps):
             self.scene.step()
-            all_contacts = self._read_contacts()
             if physics_observer is not None:
+                all_contacts = self._read_contacts()
                 physics_observer(all_contacts)
+        if physics_observer is None:
+            all_contacts = self._read_contacts()
 
         t_s = self.step_count * self.control_dt
         arm_states: Dict[str, ArmState] = {}

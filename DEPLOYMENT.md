@@ -75,6 +75,8 @@ run="runs/bowl_${run_id}"
   --output "$run/collection_audit.json"
 ```
 
+中断后可用同一输出目录、起始种子、数量和录像步幅加 `--resume` 续采，已完成和中断的尝试都会保留。
+
 将已验收示范的前 100 对用于训练，后 100 对用于保留验证。动作归一化分位数由训练划分拟合。可用 `--instructions` 读取数据发布中的任务指令。
 
 ```bash

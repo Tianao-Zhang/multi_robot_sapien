@@ -180,10 +180,11 @@ class LiveSceneEnv(MultiRobotEnv):
                 link, offset = self.camera_mounts[name]
                 self.world.cameras[name].set_entity_pose(link.get_entity_pose() * offset)
         self.world.scene.update_render()
+        for name in names:
+            self.world.cameras[name].take_picture()
         images = {}
         for name in names:
             camera = self.world.cameras[name]
-            camera.take_picture()
             images[name] = (255 * np.clip(camera.get_picture("Color")[..., :3], 0, 1)).astype(np.uint8)
         return images
 
