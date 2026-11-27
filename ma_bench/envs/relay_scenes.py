@@ -9,10 +9,11 @@ from .scene_tools import Layout, add_aloha, as_rotation, box, compound, down, ro
 
 
 def _transfer(motion, arm, body, grip_offset, destination, yaw, home):
-    source = motion.world.get_body_pose(body)[0]
-    offset = np.asarray(grip_offset)
+    source, quat = motion.world.get_body_pose(body)
+    heading = as_rotation(quat).as_euler("ZYX", degrees=True)[0]
+    offset = Rotation.from_euler("Z", heading, degrees=True).apply(grip_offset)
     destination = np.asarray(destination)
-    rotation = down(yaw)
+    rotation = down(yaw + heading)
 
     def target(point, extra_height=0.):
         return {arm: (point + offset + [0, 0, extra_height], rotation)}
@@ -34,13 +35,24 @@ def build_bowl(world) -> Layout:
     add_aloha(world, "A", (-.59, -.665, 0), 90)
     add_aloha(world, "B", (.59, -.665, 0), 90)
     rng = np.random.default_rng(world.mode.seed)
-    position = (-.42 + rng.uniform(-.008, .008), .003, table_z + .008)
-    blue = (.10, .31, .53)
+    position = (-.42 + rng.uniform(-.016, .016), .003 + rng.uniform(-.012, .012), table_z + .008)
+    heading = float(rng.uniform(-4., 4.))
+    colors = ((.10, .31, .53), (.30, .48, .27), (.49, .26, .34), (.25, .39, .52), (.34, .26, .51))
+    variant = int(rng.integers(len(colors)))
+    blue = colors[variant]
+    radius = float(rng.choice([.067, .070, .073]))
     grip = (.92, .62, .20)
-    parts = round_bin(.070, .037, blue)
+    parts = round_bin(radius, .037, blue)
     parts += [box((0., -.076, .031), (.016, .020, .012), blue),
               box((0., -.103, .047), (.019, .017, .021), grip, friction=2.6)]
-    compound(world, "bowl", position, parts)
+    compound(world, "bowl", position, parts, quat=wxyz(Rotation.from_euler("Z", heading, degrees=True)))
+    exchange = (float(rng.uniform(-.012, .012)), float(rng.uniform(-.010, .016)), table_z + .008)
+    goal = (.45 + float(rng.uniform(-.014, .014)), float(rng.uniform(-.010, .016)), table_z + .008)
+    pause = int(rng.integers(25, 46))
+    world.bodies["bowl"]["attributes"].update(
+        variant=variant, radius_m=radius, color_rgb=blue, initial_yaw_deg=heading,
+        exchange_target=exchange, goal_target=goal, exchange_wait_ticks=pause,
+    )
     for key, center, half, color in (
         ("start_zone", -.42, .115, (.75, .42, .13)),
         ("exchange_zone", 0., .125, (.85, .70, .14)),
@@ -53,9 +65,9 @@ def build_bowl(world) -> Layout:
         a, b = "A.right", "B.left"
         a_home, b_home = world.get_arm_pose(a), world.get_arm_pose(b)
         offset = (0, -.103, .047 + .143)
-        _transfer(motion, a, "bowl", offset, (0., .003, table_z + .008), 90, a_home)
-        motion.hold(25)
-        _transfer(motion, b, "bowl", offset, (.45, .003, table_z + .008), 90, b_home)
+        _transfer(motion, a, "bowl", offset, exchange, 90, a_home)
+        motion.hold(pause)
+        _transfer(motion, b, "bowl", offset, goal, 90, b_home)
         motion.hold(35)
 
     return Layout(expert, ((.09, 1.81, 1.97), (0., -.22, .78)))

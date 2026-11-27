@@ -13,7 +13,7 @@ from ma_task_harness.runtime.sapien_world import SapienMultiRobotWorld, look_at_
 from ma_task_harness.runtime.state_types import ExecutionMode
 from ma_task_harness.spec.schema import examples_dir, load_task_spec
 
-from .scene_tools import Motion, as_rotation
+from .scene_tools import Motion, as_rotation, wxyz
 
 
 def build_layout(world, task):
@@ -47,6 +47,8 @@ class _ScoredWorld(SapienMultiRobotWorld):
 
 
 class LiveSceneEnv(MultiRobotEnv):
+    endpose_frame = "shared PhysX world, quaternion wxyz"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.spec = load_task_spec(examples_dir() / self.task_info.taskspec_filename)
@@ -127,6 +129,32 @@ class LiveSceneEnv(MultiRobotEnv):
                 high = np.asarray(arm.gripper_open_q)
                 opening = np.clip((qpos - low) / (high - low), 0., 1.).mean()
                 state[i, 8 * j:8 * (j + 1)] = [*pos, *quat, opening]
+        return state
+
+    def agent_to_world(self, agent: str) -> np.ndarray:
+        return np.eye(4)
+
+    def commanded_state(self) -> np.ndarray:
+        """Forward kinematics of the joint drive targets applied at this tick."""
+        state = np.zeros((self.num_agents, 16), dtype=np.float64)
+        for i, robot in enumerate(self.task_info.robots):
+            arms = [self.world.arms[key] for _, key in self._arms(robot)]
+            articulation = self.world.robots[robot.role_key]
+            root = articulation.get_root_pose()
+            rotation = as_rotation(root.q)
+            qpos = articulation.get_qpos().astype(np.float64)
+            for arm in arms:
+                qpos[arm.arm_indices] = arm.target_q
+                closed, opened = map(np.asarray, (arm.gripper_closed_q, arm.gripper_open_q))
+                qpos[arm.finger_indices] = closed + arm.gripper_open * (opened - closed)
+            planner = arms[0].planner
+            kinematics = planner.pinocchio_model
+            kinematics.compute_forward_kinematics(qpos)
+            for j, arm in enumerate(arms):
+                pose = kinematics.get_link_pose(planner.link_name_2_idx[arm.move_group])
+                state[i, 8*j:8*(j+1)] = [
+                    *(root.p + rotation.apply(pose.p)), *wxyz(rotation * as_rotation(pose.q)), arm.gripper_open,
+                ]
         return state
 
     def render(self, names):

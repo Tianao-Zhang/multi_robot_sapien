@@ -24,6 +24,8 @@ class _ObservedWorld(SapienMultiRobotWorld):
 
 
 class FindCommonColorEnv(MultiRobotEnv):
+    endpose_frame = "agent tabletop frame, quaternion wxyz"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.spec = load_task_spec(examples_dir() / "find_common_color.yaml")

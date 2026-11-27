@@ -220,7 +220,10 @@ class SapienMultiRobotWorld:
         self.enable_render = bool(enable_render) and os.environ.get("MAWAM_HARNESS_DISABLE_RENDER") != "1"
 
         sapien.render.set_camera_shader_dir("default")
-        self.scene = sapien.Scene()
+        render_device = os.environ.get("MAWAM_RENDER_DEVICE")
+        self.scene = sapien.Scene([
+            sapien.physx.PhysxCpuSystem(), sapien.render.RenderSystem(render_device),
+        ]) if render_device else sapien.Scene()
         self.scene.set_timestep(self.physics_dt)
         self.scene.default_physical_material = self.scene.create_physical_material(1.0, 0.9, 0.0)
         self.scene.add_ground(0.0)
