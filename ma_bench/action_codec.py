@@ -18,6 +18,8 @@ Video latent canvas per robot: (48, F, 24, 20)
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Dict, Mapping, Sequence, Tuple
 
 import numpy as np
@@ -173,6 +175,13 @@ class ActionCodec:
         self.q99 = np.asarray(self.q99, dtype=np.float64)
         if self.q01.shape != (ACTION_DIM,) or self.q99.shape != (ACTION_DIM,):
             raise ValueError("q01 and q99 must have shape (30,)")
+        if not np.isfinite(self.q01).all() or not np.isfinite(self.q99).all() or np.any(self.q01 > self.q99):
+            raise ValueError("Action quantiles must be finite and ordered")
+
+    @classmethod
+    def from_file(cls, path: Path, clip: float = 5.0) -> ActionCodec:
+        stats = json.loads(path.read_text(encoding="utf-8"))
+        return cls(q01=stats["q01"], q99=stats["q99"], clip=clip)
 
     def encode_slots(self, raw_rel_16: np.ndarray, embodiment: str) -> Tuple[np.ndarray, np.ndarray]:
         """Map `[T, 16]` relative actions -> normalized clipped `[T, 30]` + bool mask `[T, 30]`."""

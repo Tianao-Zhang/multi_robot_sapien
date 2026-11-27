@@ -19,7 +19,6 @@ import argparse
 import copy
 import json
 from pathlib import Path
-import sys
 import time
 from typing import Any, Dict
 
@@ -27,9 +26,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ma_bench.action_codec import EMBODIMENT_SLOTS, USED_ACTION_CHANNEL_IDS, INVERSE_USED_ACTION_CHANNEL_IDS
+from ma_bench.action_codec import ActionCodec, EMBODIMENT_SLOTS, USED_ACTION_CHANNEL_IDS, INVERSE_USED_ACTION_CHANNEL_IDS
 from ma_bench.registry import get_task_info
 from mawam.config import InferenceConfig, load_inference_config
+from mawam.upstream import add_lingbot_source
 
 
 CAMERA_KEYS = (
@@ -51,6 +51,7 @@ class MawamPolicyServer:
         infer_cfg: InferenceConfig,
         device: str = "cuda:0",
         seed: int = 0,
+        action_norm: Path | None = None,
     ) -> None:
         from configs import VA_CONFIGS
         from modules.utils import WanVAEStreamingWrapper, load_vae
@@ -117,8 +118,13 @@ class MawamPolicyServer:
         self._build_conditioning()
 
         # Normalization and per-agent embodiment masks m_{e_k} over 30-D slots
-        self.q01 = torch.tensor(self.va_cfg.norm_stat["q01"], device=self.device).reshape(1, 30, 1, 1, 1)
-        self.q99 = torch.tensor(self.va_cfg.norm_stat["q99"], device=self.device).reshape(1, 30, 1, 1, 1)
+        if action_norm is not None:
+            codec = ActionCodec.from_file(action_norm)
+            q01, q99 = codec.q01, codec.q99
+        else:
+            q01, q99 = self.va_cfg.norm_stat["q01"], self.va_cfg.norm_stat["q99"]
+        self.q01 = torch.tensor(q01, device=self.device, dtype=torch.float32).reshape(1, 30, 1, 1, 1)
+        self.q99 = torch.tensor(q99, device=self.device, dtype=torch.float32).reshape(1, 30, 1, 1, 1)
         self.action_clip = float(self.task_info.action_clip)
         self.action_mask = torch.zeros((self.num_agents, 30), dtype=torch.bool, device=self.device)
         for k, robot in enumerate(self.task_info.robots):
@@ -350,9 +356,10 @@ def main() -> int:
     p.add_argument("--port", type=int, default=25300)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--action-norm", type=Path, help="Per-task action quantiles bundled with a local training split")
     args = p.parse_args()
 
-    sys.path.insert(0, str(args.upstream_root.resolve()))
+    add_lingbot_source(args.upstream_root)
     from utils.Simple_Remote_Infer.deploy.websocket_policy_server import WebsocketPolicyServer
 
     infer_cfg = (
@@ -368,6 +375,7 @@ def main() -> int:
         infer_cfg=infer_cfg,
         device=args.device,
         seed=args.seed,
+        action_norm=args.action_norm,
     )
     print(
         json.dumps(

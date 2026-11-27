@@ -9,8 +9,21 @@ from pathlib import Path
 
 import torch
 
-from ma_bench.registry import get_task_info
+from ma_bench.registry import TaskInfo, get_task_info
 from mawam.upstream import add_lingbot_source
+
+
+def task_prompts(task: TaskInfo, instructions: Path | None = None) -> tuple[str, list[str]]:
+    if instructions is None:
+        return task.global_prompt, list(task.local_prompts)
+    payload = json.loads(instructions.read_text(encoding="utf-8"))
+    if payload["task"] != task.slug:
+        raise ValueError(f"Instructions in {instructions} are for a different task")
+    global_prompt = payload["instruction"]
+    local_prompts = [payload[f"agent_{robot.role_key.lower()}"] for robot in task.robots]
+    if not all(isinstance(prompt, str) and prompt.strip() for prompt in [global_prompt, *local_prompts]):
+        raise ValueError(f"Incomplete instructions in {instructions}")
+    return global_prompt, local_prompts
 
 
 def encode_prompts(
@@ -94,15 +107,17 @@ def main() -> int:
     p.add_argument("--output", type=Path, required=True, help="Dataset root where text/text_cache.pt will be saved")
     p.add_argument("--device", default="cuda")
     p.add_argument("--upstream-root", type=Path, default=Path("third_party/LingBot-VA"))
+    p.add_argument("--instructions", type=Path, help="MA-Bench instructions.json for this task")
     args = p.parse_args()
 
     add_lingbot_source(args.upstream_root)
     info = get_task_info(args.task)
+    global_prompt, local_prompts = task_prompts(info, args.instructions)
     out = encode_prompts(
         model_dir=args.base_model.resolve(),
         output_dir=args.output.resolve(),
-        global_prompt=info.global_prompt,
-        local_prompts=list(info.local_prompts),
+        global_prompt=global_prompt,
+        local_prompts=local_prompts,
         device=args.device,
     )
     print(f"Saved frozen T5 text cache to {out}")

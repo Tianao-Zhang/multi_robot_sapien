@@ -196,7 +196,7 @@ class LiveSceneEnv(MultiRobotEnv):
                    for key, view in zip(self.CAMERA_KEYS, views)}
         return MultiRobotObservation(self.step_count, self.time_s, grouped, self.canonical_state())
 
-    def step_control(self, absolute_ee_targets_wxyz):
+    def advance_control(self, absolute_ee_targets_wxyz) -> bool:
         if self.world is None:
             raise RuntimeError("Call reset(seed) before step_control")
         actions = np.asarray(absolute_ee_targets_wxyz, dtype=np.float64)
@@ -215,7 +215,11 @@ class LiveSceneEnv(MultiRobotEnv):
                 grippers[key] = opening
         if not self.world.move_arms_to(targets, steps=1, grippers=grippers):
             raise RuntimeError("SAPIEN/mplib could not solve the requested control step")
-        return self._observation(), self.step_count >= self.max_steps
+        return self.step_count >= self.max_steps
+
+    def step_control(self, absolute_ee_targets_wxyz):
+        done = self.advance_control(absolute_ee_targets_wxyz)
+        return self._observation(), done
 
     def _score(self, frame) -> None:
         self.step_count = self.world.step_count

@@ -102,7 +102,8 @@ def main() -> int:
         va_cfg.rank, va_cfg.local_rank, va_cfg.world_size = rank, local_rank, world
         va_cfg.empty_emb_path = str(args.dataset_root / "text" / "empty_emb.pt")
 
-        codec = ActionCodec(
+        norm_path = args.dataset_root / "action_norm.json"
+        codec = ActionCodec.from_file(norm_path, clip=train_cfg.action_clip) if norm_path.is_file() else ActionCodec(
             q01=va_cfg.norm_stat["q01"],
             q99=va_cfg.norm_stat["q99"],
             clip=train_cfg.action_clip,

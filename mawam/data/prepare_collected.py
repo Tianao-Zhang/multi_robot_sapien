@@ -1,4 +1,4 @@
-"""Prepare synchronized local color demonstrations for both MAWAM training stages."""
+"""Prepare synchronized local demonstrations for both MAWAM training stages."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ import numpy as np
 import torch
 from torch.nn.functional import interpolate
 
-from ma_bench.action_codec import ACTION_PER_FRAME
+from ma_bench.action_codec import ACTION_PER_FRAME, INVERSE_USED_ACTION_CHANNEL_IDS, relative_from_absolute
 from ma_bench.registry import get_task_info
 from mawam.data.prepare_pairs import build_stage2_manifest
-from mawam.data.prepare_text_cache import encode_prompts
+from mawam.data.prepare_text_cache import encode_prompts, task_prompts
 from mawam.data.stage1_dataset import CAMERA_KEYS
 from mawam.upstream import add_lingbot_source
 
@@ -25,35 +25,43 @@ VIEWS = (("head", (256, 320)), ("left_wrist", (128, 160)), ("right_wrist", (128,
 CAMERA_TICK_STRIDE = 4
 
 
-def read_actions(path: Path) -> np.ndarray:
+def read_recording(path: Path, expected_seed: int) -> tuple[np.ndarray, int]:
     with h5py.File(path) as record:
         ticks = record["tick"][:]
-        if record.attrs["control_hz"] != 25 or not np.array_equal(ticks, np.arange(len(ticks))):
-            raise ValueError(f"Expected contiguous 25 Hz ticks in {path}")
+        stride = int(record.attrs.get("video_stride", 1))
+        if stride not in (1, CAMERA_TICK_STRIDE) or record.attrs["control_hz"] != 25:
+            raise ValueError(f"Incompatible control or camera rate in {path}")
+        if record.attrs["scene_seed"] != expected_seed or not np.array_equal(ticks, np.arange(len(ticks))):
+            raise ValueError(f"Incompatible seed or non-contiguous ticks in {path}")
         for view, _ in VIEWS:
-            if not np.array_equal(record[f"video_tick/{view}"][:], ticks):
+            if not np.array_equal(record[f"video_tick/{view}"][:], ticks[::stride]):
                 raise ValueError(f"Camera {view} is out of sync in {path}")
-        poses = record["native/endpose"]
-        actions = np.column_stack((
-            poses["left_endpose"][:], poses["left_gripper"][:],
-            poses["right_endpose"][:], poses["right_gripper"][:],
-        )).astype(np.float32)
+        if "native/command_endpose_wxyz" in record:
+            actions = record["native/command_endpose_wxyz"][:].astype(np.float32)
+            actions[0] = record["native/reference_endpose_wxyz"][:]
+        else:
+            poses = record["native/endpose"]
+            actions = np.column_stack((
+                poses["left_endpose"][:], poses["left_gripper"][:],
+                poses["right_endpose"][:], poses["right_gripper"][:],
+            )).astype(np.float32)
     if actions.shape != (len(ticks), 16) or not np.isfinite(actions).all():
         raise ValueError(f"Invalid bimanual end-effector poses in {path}")
-    return actions
+    return actions, stride
 
 
-def encode_camera(vae, path: Path, size: tuple[int, int], ticks: int, last_tick: int) -> torch.Tensor:
+def encode_camera(vae, path: Path, size: tuple[int, int], ticks: int, last_tick: int, stride: int) -> torch.Tensor:
     frames = []
     with imageio.get_reader(path, "ffmpeg") as video:
-        if not np.isclose(video.get_meta_data()["fps"], 25):
-            raise ValueError(f"Expected a 25 Hz video at {path}")
+        if not np.isclose(video.get_meta_data()["fps"], 25 / stride):
+            raise ValueError(f"Expected a {25/stride:g} Hz video at {path}")
         count = 0
-        for tick, rgb in enumerate(video):
+        for index, rgb in enumerate(video):
             count += 1
+            tick = index * stride
             if tick <= last_tick and tick % CAMERA_TICK_STRIDE == 0:
                 frames.append(rgb)
-        if count != ticks:
+        if count != len(range(0, ticks, stride)):
             raise ValueError(f"Found {count} video frames for {ticks} ticks at {path}")
 
     pixels = torch.as_tensor(np.stack(frames), device=vae.device).permute(0, 3, 1, 2).float()
@@ -70,14 +78,28 @@ def encode_camera(vae, path: Path, size: tuple[int, int], ticks: int, last_tick:
     return latent
 
 
-def prepare(input_root: Path, output: Path, base_model: Path, device: str) -> None:
+def prepare(
+    input_root: Path,
+    output: Path,
+    base_model: Path,
+    device: str,
+    *,
+    first: int = 0,
+    count: int | None = None,
+    fit_action_norm: bool = False,
+    instructions: Path | None = None,
+) -> None:
     from modules.utils import load_vae
 
     batch = json.loads((input_root / "collection_report.json").read_text(encoding="utf-8"))
     task = get_task_info(batch["task"])
+    global_prompt, local_prompts = task_prompts(task, instructions)
     accepted = [episode for episode in batch["episodes"] if episode["accepted"]]
-    if task.slug != "find_common_color" or not accepted:
-        raise ValueError("Provide a local find_common_color collection with accepted episodes")
+    if task.slug not in ("find_common_color", "joint_bowl_placing") or not accepted:
+        raise ValueError("Provide a supported local collection with accepted episodes")
+    accepted = accepted[first:] if count is None else accepted[first:first + count]
+    if first < 0 or not accepted or (count is not None and len(accepted) != count):
+        raise ValueError("The requested range exceeds the accepted episodes")
     for folder in ("vae", "text_encoder", "tokenizer"):
         if not (base_model / folder).is_dir():
             raise FileNotFoundError(f"Missing LingBot-VA checkpoint component: {base_model / folder}")
@@ -88,27 +110,31 @@ def prepare(input_root: Path, output: Path, base_model: Path, device: str) -> No
     dtype = torch.bfloat16 if torch.device(device).type == "cuda" else torch.float32
     vae = load_vae(str(base_model / "vae"), dtype, device).eval().requires_grad_(False)
     episodes = []
+    norm_samples = []
     for item in accepted:
         source = (input_root / item["directory"]).resolve()
         if not source.is_relative_to(input_root / "tasks" / task.slug):
             raise ValueError(f"Invalid accepted episode path {source}")
         joint_id = source.name
         teams = [(robot, source / f"agent_{robot.role_key.lower()}") for robot in task.robots]
-        actions = [read_actions(directory / "trajectory.h5") for _, directory in teams]
-        ticks = len(actions[0])
-        if ticks <= ACTION_PER_FRAME or any(len(seq) != ticks for seq in actions):
+        recordings = [read_recording(directory / "trajectory.h5", item["seed"]) for _, directory in teams]
+        ticks = len(recordings[0][0])
+        if ticks <= ACTION_PER_FRAME or any(len(seq) != ticks or stride != recordings[0][1] for seq, stride in recordings):
             raise ValueError(f"Incompatible action clocks in {source}")
         last_tick = ((ticks - 1) // ACTION_PER_FRAME) * ACTION_PER_FRAME
 
-        for (robot, directory), seq in zip(teams, actions):
+        for (robot, directory), (seq, stride) in zip(teams, recordings):
             relative = Path("episodes") / joint_id / directory.name
             (stage1 / relative).mkdir(parents=True, exist_ok=False)
             actions_path = relative / "actions.pt"
-            torch.save({"raw_action16_wxyz": torch.from_numpy(seq[: last_tick + 1].copy())}, stage1 / actions_path)
+            seq = seq[:last_tick + 1].copy()
+            torch.save({"raw_action16_wxyz": torch.from_numpy(seq)}, stage1 / actions_path)
+            if fit_action_norm:
+                norm_samples.append(relative_from_absolute(seq[1:], seq[0]))
             latent_paths = {}
             for key, (view, size) in zip(CAMERA_KEYS, VIEWS):
                 latent_path = relative / f"{view}.pt"
-                latent = encode_camera(vae, directory / "videos" / f"{view}.mp4", size, ticks, last_tick)
+                latent = encode_camera(vae, directory / "videos" / f"{view}.mp4", size, ticks, last_tick, stride)
                 torch.save({"latent": latent}, stage1 / latent_path)
                 latent_paths[key] = latent_path.as_posix()
             episodes.append({
@@ -120,11 +146,18 @@ def prepare(input_root: Path, output: Path, base_model: Path, device: str) -> No
         print(f"Prepared {joint_id} ({last_tick + 1} of {ticks} ticks)", flush=True)
 
     del vae
-    encode_prompts(base_model, stage1, task.global_prompt, list(task.local_prompts), device)
+    encode_prompts(base_model, stage1, global_prompt, local_prompts, device)
     manifest = {"schema": "mawam.stage1.manifest.v1", "task": task.slug, "episodes": episodes}
     (stage1 / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     copytree(stage1 / "text", stage2 / "text")
     build_stage2_manifest(stage1, stage2, task.slug)
+    if fit_action_norm:
+        raw = np.concatenate(norm_samples, axis=0)
+        slots = np.pad(raw, ((0, 0), (0, 1)))[:, INVERSE_USED_ACTION_CHANNEL_IDS]
+        q01, q99 = np.quantile(slots, (0.01, 0.99), axis=0)
+        norm = {"task": task.slug, "q01": q01.tolist(), "q99": q99.tolist(), "source_seeds": [item["seed"] for item in accepted]}
+        for folder in (stage1, stage2):
+            (folder / "action_norm.json").write_text(json.dumps(norm, indent=2) + "\n", encoding="utf-8")
 
 
 def main() -> int:
@@ -134,9 +167,16 @@ def main() -> int:
     parser.add_argument("--base-model", default=Path("checkpoints/lingbot-va-base"), type=Path)
     parser.add_argument("--upstream-root", default=Path("third_party/LingBot-VA"), type=Path)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--first", type=int, default=0, help="Offset in the accepted episode list")
+    parser.add_argument("--count", type=int, help="Number of accepted episodes to prepare")
+    parser.add_argument("--fit-action-norm", action="store_true", help="Fit per-task action quantiles on this training split")
+    parser.add_argument("--instructions", type=Path, help="MA-Bench instructions.json for this task")
     args = parser.parse_args()
     add_lingbot_source(args.upstream_root)
-    prepare(args.input_root.resolve(), args.output.resolve(), args.base_model.resolve(), args.device)
+    prepare(
+        args.input_root.resolve(), args.output.resolve(), args.base_model.resolve(), args.device,
+        first=args.first, count=args.count, fit_action_norm=args.fit_action_norm, instructions=args.instructions,
+    )
     return 0
 
 
