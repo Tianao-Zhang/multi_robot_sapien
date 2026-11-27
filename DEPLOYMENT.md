@@ -44,7 +44,7 @@ env -u PYTHONPATH .venv-train/bin/python -m mawam.data.prepare_collected \
   --input-root "$raw" --output "$prepared"
 ```
 
-七个场景可分别运行和录像。同步数据采集与上述转换入口支持 `find_common_color`。转换只读取已验收的示范，按控制 tick 检查双机器人和三路镜头的同步。动作标签取实际执行后的双臂末端位姿和夹爪开度，RGB 由 25 Hz 下采样到 6.25 Hz 后用 Wan VAE 编码。输出包含 Stage 1 逐机器人清单、Stage 2 同步配对清单及冻结的 T5 文本缓存。
+七个场景可分别运行和录像。同步数据采集与上述转换入口支持 `find_common_color` 和 `joint_bowl_placing`。转换只读取已验收的示范，按控制 tick 检查双机器人和三路镜头的同步。RGB 以 6.25 Hz 输入 Wan VAE。输出包含 Stage 1 逐机器人清单、Stage 2 同步配对清单及冻结的 T5 文本缓存。
 
 ## 训练
 
@@ -61,3 +61,27 @@ DATASET_ROOT="$prepared/stage2" RUN_ROOT="runs/color_${run_id}_stage2" \
   STAGE1_CKPT="$stage1_run/checkpoints/checkpoint_step_3000" \
   bash scripts/train_stage2.sh
 ```
+
+## 四臂接力放碗
+
+采集验收要求 A 左臂、A 右臂、B 右臂、B 左臂按顺序接触并抬升同一只碗，且通过 MA-Bench 的六项里程碑。保留所有失败尝试及其诊断。在 250 Hz 仿真、25 Hz 控制下记录全部控制指令和实测状态，并在每四个控制 tick 保存双机器人各三路 RGB 和总览。末端动作目标由实际关节驱动指令正运动学得到。
+
+```bash
+raw="datasets/bowl_${run_id}"
+run="runs/bowl_${run_id}"
+.venv/bin/python -m ma_bench.collect_demos --task bowl --num-episodes 200 \
+  --max-attempts 320 --workers 4 --seed-start 0 --video-stride 4 --output "$raw"
+.venv/bin/python -m ma_bench.audit_bowl_collection --collection "$raw" \
+  --output "$run/collection_audit.json"
+```
+
+将已验收示范的前 100 对用于训练，后 100 对用于保留验证。动作归一化分位数由训练划分拟合。可用 `--instructions` 读取数据发布中的任务指令。
+
+```bash
+.venv-train/bin/python -m mawam.data.prepare_collected --input-root "$raw" \
+  --output "${raw}_train" --first 0 --count 100 --fit-action-norm
+.venv-train/bin/python -m mawam.data.prepare_collected --input-root "$raw" \
+  --output "${raw}_holdout" --first 100 --count 100
+```
+
+论文模式闭环评测使用 `benchmark` 推理配置，预先由专家验证评测种子，单试验上限 90 秒。用 `ma_bench.eval_runner --task bowl --seed-file ... --num-trials 100 --video-dir ... --output ...` 运行、逐场保存视频与指标。本地资产、专家路径和硬件与论文原始环境有差异。 [论文与实验设置](https://arxiv.org/html/2611.29501v1)
