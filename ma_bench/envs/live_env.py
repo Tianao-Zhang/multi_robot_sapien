@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from ma_bench.envs.base_env import MultiRobotEnv, MultiRobotObservation
 from ma_bench.evaluators import StepEvidence, make_evaluator
@@ -51,6 +52,8 @@ class LiveSceneEnv(MultiRobotEnv):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if self.task_info.slug == "joint_bowl_placing":
+            self.endpose_frame = "per-robot tabletop frame, quaternion wxyz"
         self.spec = load_task_spec(examples_dir() / self.task_info.taskspec_filename)
         self.max_steps = round(self.task_info.nominal_duration_s * self.task_info.control_hz)
         self.world = None
@@ -121,6 +124,8 @@ class LiveSceneEnv(MultiRobotEnv):
     def canonical_state(self):
         state = np.zeros((self.num_agents, 16), dtype=np.float64)
         for i, robot in enumerate(self.task_info.robots):
+            transform = self.agent_to_world(robot.role_key)
+            rotation = Rotation.from_matrix(transform[:3, :3]).inv()
             for j, (_, key) in enumerate(self._arms(robot)):
                 pos, quat = self.world.get_arm_pose(key)
                 arm = self.world.arms[key]
@@ -128,11 +133,18 @@ class LiveSceneEnv(MultiRobotEnv):
                 low = np.asarray(arm.gripper_closed_q)
                 high = np.asarray(arm.gripper_open_q)
                 opening = np.clip((qpos - low) / (high - low), 0., 1.).mean()
-                state[i, 8 * j:8 * (j + 1)] = [*pos, *quat, opening]
+                state[i, 8 * j:8 * (j + 1)] = [
+                    *rotation.apply(pos - transform[:3, 3]), *wxyz(rotation * as_rotation(quat)), opening,
+                ]
         return state
 
     def agent_to_world(self, agent: str) -> np.ndarray:
-        return np.eye(4)
+        transform = np.eye(4)
+        if self.task_info.slug == "joint_bowl_placing":
+            root = self.world.robots[agent].get_root_pose()
+            transform[:3, :3] = (as_rotation(root.q) * Rotation.from_euler("Z", -90, degrees=True)).as_matrix()
+            transform[:3, 3] = (root.p[0], 0., root.p[2])
+        return transform
 
     def commanded_state(self) -> np.ndarray:
         """Forward kinematics of the joint drive targets applied at this tick."""
@@ -142,6 +154,8 @@ class LiveSceneEnv(MultiRobotEnv):
             articulation = self.world.robots[robot.role_key]
             root = articulation.get_root_pose()
             rotation = as_rotation(root.q)
+            transform = self.agent_to_world(robot.role_key)
+            world_to_agent = Rotation.from_matrix(transform[:3, :3]).inv()
             qpos = articulation.get_qpos().astype(np.float64)
             for arm in arms:
                 qpos[arm.arm_indices] = arm.target_q
@@ -152,8 +166,10 @@ class LiveSceneEnv(MultiRobotEnv):
             kinematics.compute_forward_kinematics(qpos)
             for j, arm in enumerate(arms):
                 pose = kinematics.get_link_pose(planner.link_name_2_idx[arm.move_group])
+                position = root.p + rotation.apply(pose.p)
                 state[i, 8*j:8*(j+1)] = [
-                    *(root.p + rotation.apply(pose.p)), *wxyz(rotation * as_rotation(pose.q)), arm.gripper_open,
+                    *world_to_agent.apply(position - transform[:3, 3]),
+                    *wxyz(world_to_agent * rotation * as_rotation(pose.q)), arm.gripper_open,
                 ]
         return state
 
@@ -188,12 +204,14 @@ class LiveSceneEnv(MultiRobotEnv):
             raise ValueError(f"Expected finite [{self.num_agents}, 16] end-effector targets")
         targets, grippers = {}, {}
         for i, robot in enumerate(self.task_info.robots):
+            transform = self.agent_to_world(robot.role_key)
+            rotation = Rotation.from_matrix(transform[:3, :3])
             for j, (_, key) in enumerate(self._arms(robot)):
                 xyz, quat, opening = actions[i, 8*j:8*j+3], actions[i, 8*j+3:8*j+7], actions[i, 8*j+7]
                 norm = np.linalg.norm(quat)
                 if norm < 1e-8:
                     raise ValueError(f"Invalid zero quaternion for {key}")
-                targets[key] = (xyz, quat / norm)
+                targets[key] = (rotation.apply(xyz) + transform[:3, 3], wxyz(rotation * as_rotation(quat / norm)))
                 grippers[key] = opening
         if not self.world.move_arms_to(targets, steps=1, grippers=grippers):
             raise RuntimeError("SAPIEN/mplib could not solve the requested control step")
@@ -245,9 +263,25 @@ class LiveSceneEnv(MultiRobotEnv):
         joints = {key: {"final_angle_deg": trace.frames[-1].bodies[key].joint_deg,
                         "max_angle_deg": max(frame.bodies[key].joint_deg for frame in trace.frames)}
                   for key, record in self.world.bodies.items() if record["kind"] == "hinge" and trace.frames}
-        return {"simulator_engine": "sapien_physx", "task_spec_sha256": self.spec.sha256(),
-                "metrics": metrics.to_dict(), "physical": physical, "accepted": metrics.joint_success,
-                "object_motion": samples, "fixture_joint_motion": joints, "phases": self.motion.phases}
+        result = {"simulator_engine": "sapien_physx", "task_spec_sha256": self.spec.sha256(),
+                  "metrics": metrics.to_dict(), "physical": physical, "accepted": metrics.joint_success,
+                  "object_motion": samples, "fixture_joint_motion": joints, "phases": self.motion.phases}
+        if self.task_info.slug == "joint_bowl_placing" and "bowl" in trace.initial_bodies:
+            arm_order = ("A.left", "A.right", "B.right", "B.left")
+            lifted_z = trace.initial_bodies["bowl"].pos[2] + .025
+            lifts = {}
+            for frame in trace.frames:
+                if frame.bodies["bowl"].pos[2] < lifted_z:
+                    continue
+                for contact in frame.contacts:
+                    a, b = contact.entity_a, contact.entity_b
+                    other = b if a == "bowl" else a if b == "bowl" else ""
+                    for arm in arm_order:
+                        if other.startswith(arm + "."):
+                            lifts.setdefault(arm, frame.step)
+            ordered = len(lifts) == len(arm_order) and all(lifts[a] < lifts[b] for a, b in zip(arm_order, arm_order[1:]))
+            result.update(four_arm_lift_ticks=lifts, four_arm_relay=ordered, accepted=metrics.joint_success and ordered)
+        return result
 
     def close(self):
         self.world = self.layout = self.motion = None

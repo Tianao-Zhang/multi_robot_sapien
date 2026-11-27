@@ -31,11 +31,11 @@ def _transfer(motion, arm, body, grip_offset, destination, yaw, home):
 
 def build_bowl(world) -> Layout:
     table_z = .74
-    worktable(world, center=(0, -.045, table_z), size=(1.30, .64, .044))
-    add_aloha(world, "A", (-.59, -.665, 0), 90)
-    add_aloha(world, "B", (.59, -.665, 0), 90)
+    worktable(world, center=(0, 0, table_z), size=(1.78, .65, .044))
+    add_aloha(world, "A", (-.35, -.65, 0), 90)
+    add_aloha(world, "B", (.35, .65, 0), -90)
     rng = np.random.default_rng(world.mode.seed)
-    position = (-.42 + rng.uniform(-.016, .016), .003 + rng.uniform(-.012, .012), table_z + .008)
+    position = (-.65 + rng.uniform(-.016, .016), -.073 + rng.uniform(-.012, .012), table_z + .008)
     heading = float(rng.uniform(-4., 4.))
     colors = ((.10, .31, .53), (.30, .48, .27), (.49, .26, .34), (.25, .39, .52), (.34, .26, .51))
     variant = int(rng.integers(len(colors)))
@@ -43,34 +43,40 @@ def build_bowl(world) -> Layout:
     radius = float(rng.choice([.067, .070, .073]))
     grip = (.92, .62, .20)
     parts = round_bin(radius, .037, blue)
-    parts += [box((0., -.076, .031), (.016, .020, .012), blue),
-              box((0., -.103, .047), (.019, .017, .021), grip, friction=2.6)]
+    for sign in (-1, 1):
+        parts.extend([
+            box((sign * .076, 0., .031), (.020, .016, .012), blue),
+            box((sign * .103, 0., .047), (.017, .019, .021), grip, friction=2.6),
+        ])
     compound(world, "bowl", position, parts, quat=wxyz(Rotation.from_euler("Z", heading, degrees=True)))
     exchange = (float(rng.uniform(-.012, .012)), float(rng.uniform(-.010, .016)), table_z + .008)
-    goal = (.45 + float(rng.uniform(-.014, .014)), float(rng.uniform(-.010, .016)), table_z + .008)
+    relay_a = (-.35, -.074, table_z + .008)
+    relay_b = (.35, .074, table_z + .008)
+    goal = (.59 + float(rng.uniform(-.014, .014)), .071 + float(rng.uniform(-.010, .016)), table_z + .008)
     pause = int(rng.integers(25, 46))
     world.bodies["bowl"]["attributes"].update(
         variant=variant, radius_m=radius, color_rgb=blue, initial_yaw_deg=heading,
-        exchange_target=exchange, goal_target=goal, exchange_wait_ticks=pause,
+        relay_a_target=relay_a, exchange_target=exchange, relay_b_target=relay_b,
+        goal_target=goal, exchange_wait_ticks=pause,
     )
     for key, center, half, color in (
-        ("start_zone", -.42, .115, (.75, .42, .13)),
+        ("start_zone", -.65, .115, (.75, .42, .13)),
         ("exchange_zone", 0., .125, (.85, .70, .14)),
-        ("goal_zone", .45, .12, (.19, .58, .68)),
+        ("goal_zone", .59, .13, (.19, .58, .68)),
     ):
         world.add_region(key, (center - half, -.108, table_z + .0005),
                          (center + half, .108, .81), visual_color=color)
 
     def expert(motion):
-        a, b = "A.right", "B.left"
-        a_home, b_home = world.get_arm_pose(a), world.get_arm_pose(b)
-        offset = (0, -.103, .047 + .143)
-        _transfer(motion, a, "bowl", offset, exchange, 90, a_home)
-        motion.hold(pause)
-        _transfer(motion, b, "bowl", offset, goal, 90, b_home)
+        passes = (("A.left", -1, relay_a, 90), ("A.right", 1, exchange, 90),
+                  ("B.right", -1, relay_b, -90), ("B.left", 1, goal, -90))
+        homes = {arm: world.get_arm_pose(arm) for arm, *_ in passes}
+        for arm, side, destination, facing in passes:
+            _transfer(motion, arm, "bowl", (side * .103, 0., .047 + .143), destination, facing, homes[arm])
+            motion.hold(pause if arm == "A.right" else 8)
         motion.hold(35)
 
-    return Layout(expert, ((.09, 1.81, 1.97), (0., -.22, .78)))
+    return Layout(expert, ((.22, 1.98, 2.24), (0., 0., .83)))
 
 
 def build_scan(world) -> Layout:
